@@ -1,0 +1,18 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+
+display_name: ainm-calibrate-submit
+experiment_name: ainm-astar-island
+description: Fetch data, calibrate simulator, predict, and submit to NM i AI competition
+
+compute: azureml:ainmxperis
+
+environment: azureml:ainm-python310:1
+
+code: ../../
+
+command: >-
+  bash infra/azure/run.sh
+
+resources:
+  instance_count: 1

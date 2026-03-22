@@ -1,0 +1,12 @@
+$schema: https://azuremlschemas.azureedge.net/latest/schedule.schema.json
+
+name: ainm-auto-submit
+display_name: ainm-auto-submit
+description: Auto calibrate and submit at :15 and :45 (after GHA fetches at :00 and :30)
+
+trigger:
+  type: cron
+  expression: "15,45 * * * *"
+  time_zone: Europe/Oslo
+
+create_job: ./pipeline.yml

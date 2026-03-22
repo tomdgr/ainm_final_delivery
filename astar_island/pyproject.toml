@@ -1,0 +1,41 @@
+[project]
+name = "nm_ai_ml"
+version = "0.1.0"
+description = "NM i AI 2026 — Astar Island (Norse World Prediction)"
+authors = [{ name = "Experis" }]
+requires-python = "~=3.10.0"
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "pygame>=2.6.1",
+    "flask>=3.0.0",
+    "scikit-learn>=1.7.2",
+    "torch>=2.0.0",
+    "tqdm>=4.60.0",
+    "streamlit>=1.30.0",
+    "xgboost>=2.0.0",
+    "lightgbm>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "ruff>=0.4.0"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nm_ai_ml*"]
+
+[tool.ruff]
+line-length = 120
+src = ["nm_ai_ml"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["nm_ai_ml"]
+force-sort-within-sections = true

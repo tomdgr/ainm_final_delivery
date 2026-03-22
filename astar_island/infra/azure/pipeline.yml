@@ -1,0 +1,16 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+
+display_name: ainm-calibrate-submit
+experiment_name: ainm-astar-island
+description: Fetch data, calibrate simulator, predict, and submit
+
+settings:
+  default_compute: azureml:ainmxperis
+
+jobs:
+  calibrate_submit:
+    type: command
+    environment: azureml:ainm-python310:2
+    code: ../../
+    command: bash infra/azure/run.sh

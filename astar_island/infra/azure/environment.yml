@@ -1,0 +1,5 @@
+$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
+name: ainm-python310
+version: 2
+description: Python 3.10 with uv for NM i AI competition
+image: 6564dccc98bc4601aab7db9bf8ecb547.azurecr.io/ainm-python310:v2
