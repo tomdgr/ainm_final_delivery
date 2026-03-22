@@ -1,0 +1,3 @@
+[submodule "norgesgruppen"]
+	path = norgesgruppen
+	url = https://github.com/tomdgr/ainm_main_comp.git
