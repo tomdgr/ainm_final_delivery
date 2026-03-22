@@ -15,7 +15,7 @@ Team: Tom Daniel Grande, Henrik Skulevold, Tobias Korten, Fridtjof Hoyer
 ## Clone
 
 ```bash
-git clone --recursive https://github.com/tomdgr/ainm_final_delivery.git
+git clone https://github.com/tomdgr/ainm_final_delivery.git
 ```
 
 ## License

@@ -1,0 +1,57 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Data (large files - keep annotations, ignore images and zips)
+data/raw/coco_dataset/train/images/
+data/raw/product_images/
+data/raw/NM_NGD_*.zip
+data/yolo/
+data/reference_embeddings.pt
+
+# Model weights (too large for git)
+weights/
+*.onnx
+*.pt
+!scripts/*.py
+
+# Submissions (large ZIPs)
+submissions/*.zip
+submissions/best_model/
+submissions/submitted_models/*.zip
+
+# Cached predictions (large)
+cached_preds*.pkl
+sweep_results.json
+
+# Azure/ML outputs
+runs/
+outputs/
+downloads/
+eval_staging/
+
+# IDE/system
+.DS_Store
+*.pdf
+.force_upload
+.snapshot_force
+
+# Temp
+/tmp/
+docs/*.log
+docs/*.aux
+docs/*.out
+docs/missfont.log
+docs/texput.log
+gallery_*.npz
+gallery_*.json

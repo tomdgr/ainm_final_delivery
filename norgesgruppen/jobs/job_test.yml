@@ -1,0 +1,15 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: system_test
+display_name: test_resnet50_smoke
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+command: >
+  curl -LsSf https://astral.sh/uv/install.sh | sh &&
+  source $HOME/.local/bin/env &&
+  uv sync --extra dev &&
+  uv run python -m pytest test/ -v &&
+  echo "=== SMOKE TESTS PASSED ===" &&
+  uv run python main.py --task-type classification --backbone resnet50 --epochs 3 --batch-size 16 --num-classes 5 --image-size 64

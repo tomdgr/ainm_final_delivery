@@ -1,0 +1,52 @@
+[
+  {
+    "name": "softvote_3x_fp16.zip",
+    "competition_score": 0.9341516611740754,
+    "detection_map50": 0.9710494856491596,
+    "classification_map50": 0.8480567373988792,
+    "num_predictions": 72859,
+    "timestamp": "2026-03-20T19:50:03.918316"
+  },
+  {
+    "name": "softvote_3x_fp16_tta.zip",
+    "competition_score": 0.6378341250805353,
+    "detection_map50": 0.6226323953716629,
+    "classification_map50": 0.6733048277345707,
+    "num_predictions": 140834,
+    "timestamp": "2026-03-20T20:11:57.812935"
+  },
+  {
+    "name": "softvote_ms_tta_v2.zip",
+    "competition_score": 0.6173846311069457,
+    "detection_map50": 0.6049051083122897,
+    "classification_map50": 0.6465035176278097,
+    "num_predictions": 105808,
+    "timestamp": "2026-03-20T20:22:55.532591"
+  },
+  {
+    "name": "wbf_3x_fp16_tta.zip",
+    "competition_score": 0.9434808559178787,
+    "detection_map50": 0.9698228663477636,
+    "classification_map50": 0.882016164914814,
+    "num_predictions": 112374,
+    "timestamp": "2026-03-20T20:59:17.417081"
+  },
+  {
+    "name": "wbf_4model_tta.zip",
+    "competition_score": 0.18387945451169505,
+    "detection_map50": 0.17578067963988325,
+    "classification_map50": 0.20277659587925595,
+    "num_predictions": 23508,
+    "timestamp": "2026-03-20T21:14:37.599266",
+    "mode": "quick"
+  },
+  {
+    "name": "wbf_soup_tta.zip",
+    "competition_score": 0.0099009900990099,
+    "detection_map50": 0.009900990099009901,
+    "classification_map50": 0.0099009900990099,
+    "num_predictions": 0,
+    "timestamp": "2026-03-20T23:15:01.071416",
+    "mode": "full"
+  }
+]

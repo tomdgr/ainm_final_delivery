@@ -1,0 +1,17 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: .
+command: curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env
+  && uv pip install --system ultralytics==8.1.0 pycocotools 'numpy>=1.23,<2' && python
+  main.py detect --model yolov8x.pt --imgsz 640 --epochs 200 --batch 8 --name fulldata_x_noflip_cp03
+  --seed 42 --flipud 0.0 --copy-paste 0.3 --val-ratio 0.0 --patience 0 && cp runs/detect/fulldata_x_noflip_cp03/weights/last.pt
+  ${{outputs.model_output}}/fulldata_x_noflip_cp03_last.pt && cp -r runs/detect/fulldata_x_noflip_cp03/*.csv
+  ${{outputs.model_output}}/ 2>/dev/null; echo '=== Done ==='
+compute: azureml:ainmxperis
+display_name: fulldata_x_noflip_cp03
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+experiment_name: norgesgruppen_detection
+outputs:
+  model_output:
+    type: uri_folder
+type: command

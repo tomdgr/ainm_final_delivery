@@ -1,0 +1,16 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: train_classifier_v2
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: /tmp/azure_code
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" timm &&
+  export AZUREML_OUTPUT_DIR=${{outputs.model_output}} &&
+  python train_classifier.py &&
+  echo "=== Done ==="

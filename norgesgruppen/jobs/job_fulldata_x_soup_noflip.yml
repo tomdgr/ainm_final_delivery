@@ -1,0 +1,22 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: fulldata_x_noflip_soup3
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" &&
+  python main.py detect --model yolov8x.pt --imgsz 640 --epochs 200 --batch 8 --name noflip_s42 --seed 42 --flipud 0.0 --val-ratio 0.0 --patience 0 &&
+  python main.py detect --model yolov8x.pt --imgsz 640 --epochs 200 --batch 8 --name noflip_s77 --seed 77 --flipud 0.0 --val-ratio 0.0 --patience 0 &&
+  python main.py detect --model yolov8x.pt --imgsz 640 --epochs 200 --batch 8 --name noflip_s123 --seed 123 --flipud 0.0 --val-ratio 0.0 --patience 0 &&
+  python scripts/build_swa_model.py runs/detect/noflip_s42/weights/last.pt runs/detect/noflip_s77/weights/last.pt runs/detect/noflip_s123/weights/last.pt --output ${{outputs.model_output}}/soup_noflip_3seed.pt --imgsz 640 &&
+  cp ${{outputs.model_output}}/soup_noflip_3seed.onnx ${{outputs.model_output}}/soup_noflip_3seed_fp16.onnx 2>/dev/null;
+  cp runs/detect/noflip_s42/weights/last.pt ${{outputs.model_output}}/noflip_s42_last.pt &&
+  cp runs/detect/noflip_s77/weights/last.pt ${{outputs.model_output}}/noflip_s77_last.pt &&
+  cp runs/detect/noflip_s123/weights/last.pt ${{outputs.model_output}}/noflip_s123_last.pt &&
+  echo "=== Done ==="

@@ -1,0 +1,114 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: train_timm_classifier_356cls
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: /tmp/azure_code
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" timm &&
+  python -c "
+  import json, torch, timm, numpy as np
+  from pathlib import Path
+  from PIL import Image
+  from torch.utils.data import Dataset, DataLoader
+  from timm.data import resolve_data_config
+  from timm.data.transforms_factory import create_transform
+  import torch.nn as nn
+
+  # Load annotations
+  with open('data/raw/coco_dataset/train/annotations.json') as f:
+      coco = json.load(f)
+  images = {img['id']: img for img in coco['images']}
+  nc = len(coco['categories'])
+  print(f'Classes: {nc}, Annotations: {len(coco[\"annotations\"])}')
+
+  # Create crop dataset
+  class CropDataset(Dataset):
+      def __init__(self, coco, image_dir, transform, product_dir=None):
+          self.samples = []
+          self.transform = transform
+          img_cache = {}
+          for ann in coco['annotations']:
+              img_id = ann['image_id']
+              if img_id not in img_cache:
+                  info = images[img_id]
+                  p = image_dir / info['file_name']
+                  img_cache[img_id] = Image.open(p).convert('RGB') if p.exists() else None
+              img = img_cache[img_id]
+              if img is None: continue
+              x,y,w,h = ann['bbox']
+              pad = max(w,h) * 0.1
+              crop = img.crop((max(0,x-pad), max(0,y-pad), min(img.width,x+w+pad), min(img.height,y+h+pad)))
+              if crop.width >= 10 and crop.height >= 10:
+                  self.samples.append((crop, ann['category_id']))
+          # Add product reference images
+          if product_dir and (product_dir / 'metadata.json').exists():
+              name_to_cat = {c['name'].strip().upper(): c['id'] for c in coco['categories']}
+              with open(product_dir / 'metadata.json') as f:
+                  meta = json.load(f)
+              for p in meta['products']:
+                  if not p.get('has_images'): continue
+                  cat_id = name_to_cat.get(p['product_name'].strip().upper())
+                  if cat_id is None: continue
+                  pdir = product_dir / p['product_code']
+                  if not pdir.exists(): continue
+                  for img_path in sorted(pdir.glob('*.jpg'))[:5]:
+                      try:
+                          img = Image.open(img_path).convert('RGB')
+                          self.samples.append((img, cat_id))
+                      except: pass
+          print(f'Total samples: {len(self.samples)}')
+      def __len__(self): return len(self.samples)
+      def __getitem__(self, idx):
+          img, label = self.samples[idx]
+          return self.transform(img), label
+
+  # Setup model
+  model = timm.create_model('convnext_tiny.fb_in22k_ft_in1k', pretrained=True, num_classes=nc)
+  model = model.cuda()
+  config = resolve_data_config(model.pretrained_cfg)
+  train_transform = create_transform(**config, is_training=True)
+  val_transform = create_transform(**config, is_training=False)
+
+  image_dir = Path('data/raw/coco_dataset/train/images')
+  product_dir = Path('data/raw/product_images')
+  ds = CropDataset(coco, image_dir, train_transform, product_dir)
+  loader = DataLoader(ds, batch_size=64, shuffle=True, num_workers=4, drop_last=True)
+
+  # Train
+  optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+  scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+  criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+  model.train()
+  for epoch in range(20):
+      total_loss, correct, total = 0, 0, 0
+      for imgs, labels in loader:
+          imgs, labels = imgs.cuda(), labels.cuda()
+          out = model(imgs)
+          loss = criterion(out, labels)
+          optimizer.zero_grad()
+          loss.backward()
+          optimizer.step()
+          total_loss += loss.item()
+          correct += (out.argmax(1) == labels).sum().item()
+          total += len(labels)
+      scheduler.step()
+      acc = correct / total * 100
+      print(f'Epoch {epoch+1}/20: loss={total_loss/len(loader):.4f} acc={acc:.1f}%')
+
+  # Export to ONNX
+  model.eval()
+  dummy = torch.randn(1, 3, 224, 224).cuda()
+  torch.onnx.export(model, dummy, 'classifier_convnext_tiny.onnx', input_names=['input'], output_names=['output'], opset_version=17, dynamic_axes={'input': {0: 'batch'}, 'output': {0: 'batch'}})
+
+  import shutil, os
+  shutil.copy('classifier_convnext_tiny.onnx', '${{outputs.model_output}}/classifier_convnext_tiny.onnx')
+  print(f'Exported: {os.path.getsize(\"classifier_convnext_tiny.onnx\")/1024/1024:.1f} MB')
+  " &&
+  echo "=== Done ==="

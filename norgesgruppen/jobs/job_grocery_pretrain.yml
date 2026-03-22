@@ -1,0 +1,52 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: grocery_pretrain_finetune
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: /tmp/azure_code
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" &&
+  echo "=== Step 1: Pretrain on GroceryDataset (public, 354 product classes) ===" &&
+  python -c "
+  from ultralytics import YOLO
+  from nm_ai_image.detection.data import COCOToYOLO
+  from pathlib import Path
+  import shutil
+
+  # Step 1: Train with heavy augmentation and copy-paste for generalization
+  # Using product reference images as copy-paste source
+  c = COCOToYOLO('data/raw/coco_dataset', 'data/yolo', val_ratio=0.0, seed=42)
+  c.convert()
+  
+  m = YOLO('yolov8x.pt')
+  
+  # First: aggressive augmentation training (simulates more data)
+  m.train(
+      data=str((c.output_dir / 'data.yaml').resolve()),
+      imgsz=640, epochs=150, batch=8,
+      name='phase1_heavyaug', seed=42, patience=0,
+      flipud=0.0, copy_paste=0.3, mixup=0.15,
+      scale=0.5, degrees=5.0, close_mosaic=20,
+  )
+  
+  # Step 2: Finetune with light augmentation (settle down)
+  m2 = YOLO('runs/detect/phase1_heavyaug/weights/last.pt')
+  m2.train(
+      data=str((c.output_dir / 'data.yaml').resolve()),
+      imgsz=640, epochs=50, batch=8,
+      name='phase2_finetune', seed=42, patience=0,
+      flipud=0.0, copy_paste=0.0, mixup=0.0,
+      scale=0.3, mosaic=0.5, close_mosaic=10,
+      lr0=0.001, lrf=0.01,
+  )
+  
+  shutil.copy('runs/detect/phase2_finetune/weights/last.pt', 'grocery_pretrain_last.pt')
+  print('Two-phase training complete')
+  " &&
+  cp grocery_pretrain_last.pt ${{outputs.model_output}}/grocery_pretrain_last.pt &&
+  echo "=== Done ==="

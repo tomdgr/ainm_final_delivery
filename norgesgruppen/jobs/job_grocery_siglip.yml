@@ -1,0 +1,16 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: grocery_classification
+display_name: grocery_siglip_base
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+command: >
+  curl -LsSf https://astral.sh/uv/install.sh | sh &&
+  source $HOME/.local/bin/env &&
+  uv sync &&
+  pip install azureml-mlflow &&
+  git clone https://github.com/marcusklasson/GroceryStoreDataset.git /tmp/grocery_data &&
+  uv run python scripts/prep_grocery_data.py /tmp/grocery_data data/raw &&
+  uv run python main.py --task-type classification --backbone siglip_base_224 --data-dir data/raw --epochs 15 --batch-size 32 --image-size 224 --augmentation medium --num-classes 81 --lr 5e-5

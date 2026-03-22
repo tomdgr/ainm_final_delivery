@@ -1,0 +1,20 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: fulldata_yolo26x_s42
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system "ultralytics>=8.3" pycocotools "numpy>=1.23,<2" &&
+  python main.py detect --model yolo26x.pt --imgsz 640 --epochs 200 --batch 8 --name fulldata_yolo26x_s42 --seed 42
+  --val-ratio 0.0 --patience 0 &&
+  cp runs/detect/fulldata_yolo26x_s42/weights/last.pt ${{outputs.model_output}}/fulldata_yolo26x_s42_last.pt &&
+  python -c "from ultralytics import YOLO; m=YOLO('runs/detect/fulldata_yolo26x_s42/weights/last.pt'); m.export(format='onnx', imgsz=640, half=True, opset=17, simplify=True)" &&
+  cp runs/detect/fulldata_yolo26x_s42/weights/last.onnx ${{outputs.model_output}}/fulldata_yolo26x_s42_fp16.onnx &&
+  cp -r runs/detect/fulldata_yolo26x_s42/*.csv ${{outputs.model_output}}/ 2>/dev/null;
+  echo "=== Done ==="

@@ -1,0 +1,46 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: yolov8x_expert_section
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" &&
+  python -c "
+  import json, shutil
+  from pathlib import Path
+  with open('data/raw/coco_dataset/train/annotations.json') as f:
+      coco = json.load(f)
+  section_keywords = ['Varmedrikker', 'Frokost', 'varm', 'kaffe', 'te ', 'kakao', 'frokost', 'müsli', 'havre', 'grøt']
+  cat_id_to_name = {c['id']: c['name'] for c in coco['categories']}
+  section_cats = set()
+  for cid, name in cat_id_to_name.items():
+      if any(kw.lower() in name.lower() for kw in section_keywords):
+          section_cats.add(cid)
+  section_imgs = set()
+  for a in coco['annotations']:
+      if a['category_id'] in section_cats:
+          section_imgs.add(a['image_id'])
+  keep_imgs = section_imgs | set(img['id'] for img in coco['images'])
+  new_coco = dict(coco)
+  out = Path('data/raw/coco_section')
+  out.mkdir(parents=True, exist_ok=True)
+  (out / 'images').mkdir(exist_ok=True)
+  for img in coco['images']:
+      src = Path('data/raw/coco_dataset/train/images') / img['file_name']
+      if src.exists():
+          shutil.copy2(src, out / 'images' / img['file_name'])
+  with open(out / 'annotations.json', 'w') as f:
+      json.dump(coco, f)
+  print(f'Section expert: {len(section_cats)} categories, {len(section_imgs)} relevant images, full dataset used')
+  " &&
+  python main.py detect --model yolov8x.pt --imgsz 640 --epochs 150 --batch 8 --name yolov8x_expert_section --coco-dir data/raw/coco_section --cls 1.5 &&
+  cp runs/detect/yolov8x_expert_section/weights/best.pt ${{outputs.model_output}}/yolov8x_expert_section_best.pt &&
+  cp runs/detect/yolov8x_expert_section/weights/last.pt ${{outputs.model_output}}/yolov8x_expert_section_last.pt &&
+  cp -r runs/detect/yolov8x_expert_section/*.csv ${{outputs.model_output}}/ 2>/dev/null;
+  echo "=== Done ==="

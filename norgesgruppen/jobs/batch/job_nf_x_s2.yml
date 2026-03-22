@@ -1,0 +1,17 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: nf_x_s2
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: /tmp/azure_code
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" &&
+  python -c "from nm_ai_image.detection.data import COCOToYOLO; c = COCOToYOLO('data/raw/coco_dataset/train', 'data/yolo', val_ratio=0.0, seed=2); c.convert(); from ultralytics import YOLO; m = YOLO('yolov8x.pt'); m.train(data=str((c.output_dir / 'data.yaml').resolve()), imgsz=640, epochs=200, batch=8, name='nf_x_s2', seed=2, patience=0, flipud=0.0)" &&
+  cp runs/detect/nf_x_s2/weights/last.pt ${{outputs.model_output}}/nf_x_s2_last.pt &&
+  cp -r runs/detect/nf_x_s2/*.csv ${{outputs.model_output}}/ 2>/dev/null;
+  echo "=== Done ==="

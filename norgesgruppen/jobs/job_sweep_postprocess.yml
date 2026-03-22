@@ -1,0 +1,28 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: sweep_postprocess_optuna
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+inputs:
+  fulldata_x:
+    type: uri_folder
+    path: azureml://jobs/maroon_okra_xq33qqcrtd/outputs/model_output
+  x_s123:
+    type: uri_folder
+    path: azureml://jobs/cool_potato_2h5grwh466/outputs/model_output
+  x_s999:
+    type: uri_folder
+    path: azureml://jobs/musing_toe_4bt75smmxw/outputs/model_output
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" onnxruntime-gpu optuna tqdm &&
+  mkdir -p weights &&
+  python -c "from ultralytics import YOLO; import glob,shutil; [(lambda pt: (YOLO(pt).export(format='onnx',imgsz=640,half=True,opset=17,simplify=True), shutil.copy(pt.replace('.pt','.onnx'), f'weights/yolov8x_640_{n}_best_fp16.onnx')))(glob.glob(s+'/*.pt')[0]) for s,n in [('${{inputs.fulldata_x}}','fulldata'),('${{inputs.x_s123}}','s123'),('${{inputs.x_s999}}','s999')]]" &&
+  python scripts/sweep_postprocess.py --n-trials 30 &&
+  cp sweep_results.json ${{outputs.model_output}}/sweep_results.json &&
+  echo "=== Done ==="

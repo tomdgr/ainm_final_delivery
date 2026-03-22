@@ -1,0 +1,19 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: norgesgruppen_detection
+display_name: yolov8l_640_s123
+compute: azureml:ainmxperis
+environment:
+  image: mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:31
+code: .
+outputs:
+  model_output:
+    type: uri_folder
+command: >-
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv pip install --system ultralytics==8.1.0 pycocotools "numpy>=1.23,<2" &&
+  python main.py detect --model yolov8l.pt --imgsz 640 --epochs 150 --batch 8 --seed 123 --name yolov8l_640_s123 --patience 30 &&
+  cp runs/detect/yolov8l_640_s123/weights/best.pt ${{outputs.model_output}}/yolov8l_640_s123_best.pt &&
+  cp runs/detect/yolov8l_640_s123/weights/last.pt ${{outputs.model_output}}/yolov8l_640_s123_last.pt &&
+  cp -r runs/detect/yolov8l_640_s123/*.csv ${{outputs.model_output}}/ 2>/dev/null;
+  cp -r runs/detect/yolov8l_640_s123/*.png ${{outputs.model_output}}/ 2>/dev/null;
+  echo "=== Done ==="

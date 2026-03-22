@@ -1,0 +1,681 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{url}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=green!50!black,
+    urlcolor=blue!70!black,
+}
+
+% --- Title ---
+\title{%
+    \textbf{Multi-Scale Ensemble Object Detection with\\
+    Weighted Boxes Fusion for Grocery Shelf Recognition}\\[0.5em]
+    \large NM i AI 2026 --- Task 3: NorgesGruppen Product Detection
+}
+
+\author{
+    Tom Daniel Grande \quad Henrik Skulevold \quad Tobias Korten \quad Fridtjof Hoyer\\[0.3em]
+    \textit{Team Experis}\\[0.2em]
+    \small NM i AI 2026 Competition, March 19--22, 2026
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ===========================================================================
+\begin{abstract}
+We present our approach to the NorgesGruppen grocery shelf product detection task at the NM i AI 2026 competition.
+The challenge requires both localizing products on retail shelves and classifying them among 356 product categories, with the final score computed as a weighted combination of detection and classification mAP@0.5.
+Our solution combines multiple YOLOv8 architectures (YOLOv8x and YOLOv8l) trained with diverse random seeds, multi-scale inference at 640px and 800px resolutions, horizontal-flip test-time augmentation, and Weighted Boxes Fusion (WBF) with absent-model-aware averaging for ensemble aggregation.
+Exported as FP16 ONNX models to satisfy the 420\,MB submission constraint, our best ensemble achieved a test score of \textbf{0.9210 mAP}, placing \textbf{4th} on the final leaderboard.
+Over the 69-hour competition window, we executed more than 100 training runs on Azure ML and systematically explored model architectures, augmentation strategies, and ensemble configurations.
+\end{abstract}
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+NM i AI (``Norgesmesterskapet i Kunstig Intelligens'') is Norway's national AI competition, held annually as a 69-hour hackathon-style event.
+The 2026 edition ran from March 19--22 and featured multiple tasks spanning natural language processing, computer vision, and time-series forecasting.
+
+\textbf{Task 3} focused on the NorgesGruppen retail domain: given an image of a grocery store shelf, the system must (1)~detect all visible product instances with bounding boxes, and (2)~classify each detected product into one of 356 fine-grained product categories.
+The evaluation metric combines detection and classification performance:
+\begin{equation}
+    \text{Score} = 0.7 \times \text{mAP}_{\text{det}}@0.5 + 0.3 \times \text{mAP}_{\text{cls}}@0.5
+    \label{eq:score}
+\end{equation}
+where $\text{mAP}_{\text{det}}@0.5$ measures localization quality (all products treated as a single class) and $\text{mAP}_{\text{cls}}@0.5$ measures per-category classification quality, both at an IoU threshold of 0.5.
+
+Submissions were evaluated on a sandboxed server running Python~3.11, PyTorch~2.6.0, Ultralytics~8.1.0, and an NVIDIA~L4 GPU, with a 300-second time limit, no network access, and a maximum ZIP size of 420\,MB.
+Teams were limited to three submissions per day.
+
+% ===========================================================================
+\section{Dataset}
+\label{sec:dataset}
+
+The training set consists of \textbf{248 images} of grocery store shelves, annotated in COCO format with approximately \textbf{22,700 bounding box annotations} across \textbf{356 product categories}.
+The images cover four store sections:
+
+\begin{itemize}    \item \textbf{Egg} --- egg products and related items
+    \item \textbf{Frokost} --- breakfast cereals, spreads, and similar products
+    \item \textbf{Knekkebrr{\o}d} --- crispbread and crackers
+    \item \textbf{Varmedrikker} --- hot beverages (coffee, tea, cocoa)
+\end{itemize}
+
+Additionally, a set of \textbf{product reference images} was provided, containing studio-quality photographs of each product from multiple angles (front, back, left, right, top, bottom).
+These reference images enable gallery-based classification approaches.
+
+The dataset presents several challenges:
+\begin{enumerate}    \item \textbf{Fine-grained similarity}: Many products are from the same brand and differ only in subtle details (e.g., flavor variants), leading to high inter-class visual similarity.
+    \item \textbf{Class imbalance}: Some categories have fewer than 10 training annotations, while others have hundreds.
+    \item \textbf{Occlusion and clutter}: Shelf images contain densely packed products with significant occlusion.
+    \item \textbf{Small dataset size}: 248 training images necessitate careful augmentation and regularization.
+\end{enumerate}
+
+% ===========================================================================
+\section{Method}
+\label{sec:method}
+
+Our approach builds on the YOLOv8 architecture family~\citep{jocher2023yolov8} and combines several complementary strategies to maximize both detection and classification performance.
+
+\subsection{Base Models}
+\label{sec:base_models}
+
+We train two YOLOv8 architecture variants:
+\begin{itemize}    \item \textbf{YOLOv8x} --- the extra-large variant with 68.2M parameters, providing the highest single-model accuracy.
+    \item \textbf{YOLOv8l} --- the large variant with 43.7M parameters, offering a complementary error profile.
+\end{itemize}
+
+All models are trained on the \emph{full} training set without a validation split.
+Through extensive experimentation, we found that withholding images for validation (even 15\%) significantly hurts performance on this small dataset, and that local validation metrics do not reliably predict test set performance (Section~\ref{sec:lessons}).
+
+Key training hyperparameters include:
+\begin{itemize}    \item 150 epochs with cosine learning rate schedule and AdamW optimizer
+    \item \texttt{flipud=0.0} --- vertical flip augmentation disabled, as grocery shelves have a canonical vertical orientation (products are never upside-down)
+    \item Mosaic augmentation with close-mosaic at epoch 130
+    \item MixUp ($p=0.15$) and copy-paste ($p=0.1$) augmentation
+    \item Multiple random seeds for diversity (seeds 42, 77, and others)
+\end{itemize}
+
+\subsection{FP16 ONNX Export}
+\label{sec:onnx}
+
+The 420\,MB submission size limit and the sandbox's PyTorch~2.6.0 environment (which breaks \texttt{.pt} loading from older Ultralytics versions) necessitate exporting all models to ONNX format with FP16 (half-precision) quantization:
+\begin{itemize}    \item YOLOv8x: $\sim$131\,MB per model (FP16 ONNX)
+    \item YOLOv8l: $\sim$84\,MB per model (FP16 ONNX)
+\end{itemize}
+This allows packing up to three models (2$\times$YOLOv8x + 1$\times$YOLOv8l $\approx$ 346\,MB) within the size budget.
+FP16 inference on the L4 GPU introduces negligible accuracy loss ($<$0.001 mAP) while halving model size.
+
+\subsection{Multi-Scale Inference}
+\label{sec:multiscale}
+
+Products on grocery shelves span a wide range of scales, from large cereal boxes to small tea packets.
+To handle this, we run inference at multiple resolutions:
+\begin{itemize}    \item \textbf{640$\times$640\,px} --- standard YOLO resolution, optimal for medium-to-large objects
+    \item \textbf{800$\times$800\,px} --- higher resolution for improved small-object detection
+    \item \textbf{960$\times$960\,px} --- evaluated in some configurations for further small-object gains
+\end{itemize}
+
+Each resolution produces an independent set of detections that are subsequently fused via WBF (Section~\ref{sec:wbf}).
+The letterbox preprocessing ensures consistent aspect ratios across scales (Section~\ref{sec:math}).
+
+\subsection{Test-Time Augmentation}
+\label{sec:tta}
+
+We apply \textbf{horizontal flip} as test-time augmentation (TTA).
+Each model runs inference on both the original image and its horizontally flipped version, with the flipped detections mirrored back to the original coordinate system.
+This effectively doubles the number of predictions per model and improves robustness to left-right asymmetries.
+
+Notably, we do \emph{not} use vertical flip TTA, consistent with the gravity-aligned nature of shelf imagery.
+
+\subsection{Weighted Boxes Fusion}
+\label{sec:wbf}
+
+Rather than Non-Maximum Suppression (NMS) or Soft-NMS for ensemble aggregation, we employ \textbf{Weighted Boxes Fusion}~(WBF)~\citep{solovyev2021wbf}, which merges overlapping detections rather than discarding them.
+WBF produces more accurate bounding box coordinates by weighted averaging of matched predictions.
+
+We use WBF with:
+\begin{itemize}    \item $\text{iou\_thr} = 0.6$
+    \item $\text{skip\_box\_thr} = 0.01$
+    \item $\text{conf\_type} = \texttt{absent\_model\_aware\_avg}$
+\end{itemize}
+
+The \texttt{absent\_model\_aware\_avg} confidence strategy is critical: it averages confidence scores only across models that actually produced a matching detection, rather than penalizing consensus boxes for models that missed them entirely.
+
+\subsection{Architecture Diversity}
+\label{sec:diversity}
+
+Our best submission uses a heterogeneous ensemble of \textbf{2$\times$YOLOv8x + 1$\times$YOLOv8l}, trained with different random seeds.
+The rationale is that different architectures (and seeds) produce different error patterns, and the WBF ensemble benefits from this diversity more than from simply adding more copies of the same model.
+
+Empirically, we found that architecture diversity (mixing YOLOv8x and YOLOv8l) outperforms homogeneous ensembles (3$\times$YOLOv8x or 3$\times$YOLOv8l) despite the individual YOLOv8l being weaker.
+
+% ===========================================================================
+\section{Mathematical Formulation}
+\label{sec:math}
+
+\subsection{Letterbox Preprocessing}
+
+Given an input image of size $(W_{\text{orig}}, H_{\text{orig}})$ and a target size $S$, the letterbox transform computes:
+\begin{align}
+    r &= \min\!\left(\frac{S}{W_{\text{orig}}},\, \frac{S}{H_{\text{orig}}}\right) \label{eq:scale}\\[4pt]
+    W_{\text{new}} &= \lfloor W_{\text{orig}} \cdot r \rfloor, \quad H_{\text{new}} = \lfloor H_{\text{orig}} \cdot r \rfloor \\[4pt]
+    p_x &= \left\lfloor \frac{S - W_{\text{new}}}{2} \right\rfloor, \quad p_y = \left\lfloor \frac{S - H_{\text{new}}}{2} \right\rfloor
+\end{align}
+The image is resized to $(W_{\text{new}}, H_{\text{new}})$ and placed on a $S \times S$ canvas padded with value 114, yielding the input tensor after normalization to $[0,1]$ and transposition to $C \times H \times W$ format.
+
+To map predicted coordinates $(x_{\text{pred}}, y_{\text{pred}})$ back to the original image:
+\begin{equation}
+    x_{\text{orig}} = \frac{x_{\text{pred}} - p_x}{r}, \quad y_{\text{orig}} = \frac{y_{\text{pred}} - p_y}{r}
+    \label{eq:unpad}
+\end{equation}
+
+\subsection{Non-Maximum Suppression}
+
+For per-class NMS within a single model, given a set of boxes $\mathcal{B} = \{b_1, \ldots, b_n\}$ with scores $\{s_1, \ldots, s_n\}$:
+
+\begin{algorithm}[H]
+\caption{Greedy Non-Maximum Suppression}
+\label{alg:nms}
+\begin{algorithmic}[1]
+\Require Boxes $\mathcal{B}$, scores $\mathcal{S}$, IoU threshold $\tau_{\text{nms}}$
+\Ensure Filtered box indices $\mathcal{K}$
+\State Sort boxes by score in descending order
+\State $\mathcal{K} \gets \emptyset$
+\While{$\mathcal{B} \neq \emptyset$}
+    \State $b^* \gets \arg\max_{b \in \mathcal{B}} s(b)$
+    \State $\mathcal{K} \gets \mathcal{K} \cup \{b^*\}$
+    \State $\mathcal{B} \gets \mathcal{B} \setminus \{b^*\}$
+    \ForAll{$b \in \mathcal{B}$}
+        \If{$\text{IoU}(b^*, b) > \tau_{\text{nms}}$}
+            \State $\mathcal{B} \gets \mathcal{B} \setminus \{b\}$
+        \EndIf
+    \EndFor
+\EndWhile
+\State \Return $\mathcal{K}$
+\end{algorithmic}
+\end{algorithm}
+
+where the Intersection over Union is defined as:
+\begin{equation}
+    \text{IoU}(b_i, b_j) = \frac{|b_i \cap b_j|}{|b_i \cup b_j|} = \frac{|b_i \cap b_j|}{|b_i| + |b_j| - |b_i \cap b_j|}
+    \label{eq:iou}
+\end{equation}
+
+\subsection{Weighted Boxes Fusion}
+
+WBF~\citep{solovyev2021wbf} operates differently from NMS: instead of suppressing overlapping boxes, it \emph{fuses} them into a single, more accurate box.
+Given $M$ models producing box sets $\{\mathcal{B}_1, \ldots, \mathcal{B}_M\}$:
+
+\begin{enumerate}    \item All boxes across models are collected and sorted by confidence score.
+    \item A cluster $C$ is formed by iteratively matching boxes with $\text{IoU} > \tau_{\text{wbf}}$ (we use $\tau_{\text{wbf}} = 0.6$).
+    \item For each cluster $C = \{(b_k, s_k)\}_{k=1}^{|C|}$, the fused box is computed as a weighted average:
+\end{enumerate}
+\begin{equation}
+    b_{\text{fused}} = \frac{\sum_{k=1}^{|C|} s_k \cdot b_k}{\sum_{k=1}^{|C|} s_k}
+    \label{eq:wbf_box}
+\end{equation}
+
+\subsection{Absent-Model-Aware Averaging}
+
+The \texttt{absent\_model\_aware\_avg} confidence type computes the fused score as:
+\begin{equation}
+    s_{\text{fused}} = \frac{\sum_{k=1}^{|C|} s_k}{N_{\text{present}}}
+    \label{eq:absent_aware}
+\end{equation}
+where $N_{\text{present}}$ is the number of models that contributed at least one box to cluster $C$, rather than the total number of models $M$.
+This avoids penalizing detections that are missed by only a subset of models --- a common scenario with architecture diversity.
+
+Compare with the standard average:
+\begin{equation}
+    s_{\text{avg}} = \frac{\sum_{k=1}^{|C|} s_k}{M}
+    \label{eq:standard_avg}
+\end{equation}
+which would unfairly reduce confidence when, e.g., only the YOLOv8x models detect a small object that the YOLOv8l model misses.
+
+\subsection{Mean Average Precision at IoU 0.5}
+
+For each class $c$, the Average Precision is computed as the area under the precision-recall curve:
+\begin{equation}
+    \text{AP}_c = \int_0^1 p_c(r)\, dr
+    \label{eq:ap}
+\end{equation}
+where $p_c(r)$ is the interpolated precision at recall level $r$.
+A detection is considered a true positive if $\text{IoU} \geq 0.5$ with a ground-truth box of the same class.
+The mean Average Precision is:
+\begin{equation}
+    \text{mAP}@0.5 = \frac{1}{|\mathcal{C}|} \sum_{c \in \mathcal{C}} \text{AP}_c
+    \label{eq:map}
+\end{equation}
+
+% ===========================================================================
+\section{Inference Pipeline}
+\label{sec:pipeline}
+
+Algorithm~\ref{alg:pipeline} describes the full inference pipeline used in our best submission.
+
+\begin{algorithm}[H]
+\caption{Multi-Scale Ensemble Inference Pipeline}
+\label{alg:pipeline}
+\begin{algorithmic}[1]
+\Require Image $I$, ONNX models $\{m_1, m_2, m_3\}$, scales $\{640, 800\}$
+\Ensure COCO-format detections $\mathcal{D}$
+\State $\mathcal{P} \gets \emptyset$ \Comment{Collect all prediction sets}
+\For{each model $m_i \in \{m_1, m_2, m_3\}$}
+    \For{each scale $s \in \{640, 800\}$}
+        \State $I_s \gets \textsc{Letterbox}(I, s)$ \Comment{Resize and pad}
+        \State $I_{\text{flip}} \gets \textsc{HFlip}(I_s)$ \Comment{Horizontal flip}
+        \State $\hat{\mathcal{B}}_{\text{orig}} \gets m_i(I_s)$ \Comment{Forward pass}
+        \State $\hat{\mathcal{B}}_{\text{flip}} \gets \textsc{MirrorBoxes}(m_i(I_{\text{flip}}))$ \Comment{TTA pass}
+        \State Apply per-class NMS to $\hat{\mathcal{B}}_{\text{orig}} \cup \hat{\mathcal{B}}_{\text{flip}}$
+        \State $\mathcal{P} \gets \mathcal{P} \cup \{\hat{\mathcal{B}}\}$
+    \EndFor
+\EndFor
+\State $\mathcal{D} \gets \textsc{WBF}(\mathcal{P},\; \tau_{\text{iou}}=0.6,\; \text{conf\_type}=\texttt{absent\_model\_aware\_avg})$
+\State \Return $\mathcal{D}$
+\end{algorithmic}
+\end{algorithm}
+
+The pipeline produces $3 \times 2 = 6$ prediction sets per image (3 models $\times$ 2 scales), each augmented with horizontal flip TTA.
+WBF fuses all sets into a single, high-quality output.
+
+% ===========================================================================
+\section{Experiments and Results}
+\label{sec:results}
+
+\subsection{Submission History}
+
+Table~\ref{tab:submissions} summarizes all competition submissions and their test set scores, ordered chronologically.
+
+\begin{table}[H]
+\centering
+\caption{All competition submissions with test scores. Score = $0.7 \times \text{mAP}_{\text{det}} + 0.3 \times \text{mAP}_{\text{cls}}$ (Eq.~\ref{eq:score}). All models exported as FP16 ONNX.}
+\label{tab:submissions}
+\small
+\begin{tabular}{@{}clccc@{}}
+\toprule
+\textbf{\#} & \textbf{Submission} & \textbf{Test Score} & \textbf{$\Delta$ vs Prev} & \textbf{Key Change} \\
+\midrule
+1 & \texttt{yolov8x\_onnx\_clean}       & 0.7802 & ---     & Single model baseline \\
+2 & \texttt{yolov8l\_640\_s77}           & 0.7700 & $-$0.010 & Different arch (YOLOv8l) \\
+3 & \texttt{onnx\_ensemble\_ms\_tuned}   & 0.9091 & $+$0.129 & WBF ensemble (x+m+s) \\
+4 & \texttt{softvote\_3x\_fp16}          & 0.9142 & $+$0.005 & Soft class voting \\
+5 & \texttt{wbf\_3x\_fp16\_tta}          & 0.9160 & $+$0.002 & WBF + TTA hflip \\
+6 & \texttt{wbf\_3x\_cls20\_tta}         & 0.9159 & $-$0.000 & cls=2.0 model swap \\
+7 & \texttt{wbf\_3x\_fulldata\_seeds}    & 0.9152 & $-$0.001 & Fulldata seed diversity \\
+8 & \texttt{wbf\_2x1l\_multiscale\_tta}  & \textbf{0.9210} & $+$0.005 & Multi-scale + arch diversity \\
+9 & \texttt{candidate6\_3scale}           & 0.9205 & $-$0.001 & 3 scales (640+800+960) + weighted WBF \\
+10 & \texttt{candidate7\_noflip}          & 0.9200 & $-$0.001 & Noflip model (flipud=0.0) \\
+11 & \texttt{candidate11\_noflip\_l}      & \textbf{0.9215} & $+$0.001 & Training diversity (noflip+arch) \\
+12 & \texttt{twostage\_convnext}          & 0.9109 & $-$0.011 & Two-stage YOLO+classifier (overfits) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Detailed Submission Analysis}
+
+\paragraph{Submission 1: Single Model Baseline (0.7802).}
+A single YOLOv8x model trained on a 85/15 train/val split, exported to full-precision ONNX. Inference at 640px with standard NMS. This established the baseline and confirmed that YOLOv8x is a strong backbone for this task. Detection-only score (all \texttt{category\_id: 0}) would cap at 0.70, so the 0.7802 confirms meaningful classification is occurring.
+
+\paragraph{Submission 2: Architecture Variant (0.7700).}
+A single YOLOv8l model with seed 77. Despite achieving \emph{higher} validation mAP (0.8040 vs 0.7984), it scored lower on the test set. This was our first evidence that \textbf{validation metrics do not predict test performance} on this dataset.
+
+\paragraph{Submission 3: First Ensemble (0.9091).}
+Three models (YOLOv8x + YOLOv8m + YOLOv8s) combined via Weighted Boxes Fusion. The $+$0.129 jump demonstrates the power of ensembling: even adding weaker models (YOLOv8m, YOLOv8s) dramatically improves performance through error diversity. WBF parameters: $\text{iou\_thr}=0.55$, $\text{skip\_box\_thr}=0.01$.
+
+\paragraph{Submission 4: Soft Class Voting (0.9142).}
+Replaced WBF with a custom soft voting mechanism: for matched boxes across models, we averaged the full 356-dim class probability vectors before taking argmax, instead of WBF's per-class box clustering. The $+$0.005 improvement suggested that preserving classification uncertainty helps. However, later experiments showed WBF is more robust.
+
+\paragraph{Submission 5: WBF + TTA (0.9160).}
+Three YOLOv8x models (fulldata, seed 123, seed 999) with WBF and horizontal flip TTA. The TTA adds $+$0.002 by providing a mirrored view that reduces left-right bias. WBF outperformed soft voting on this configuration. This became our baseline for further improvements.
+
+\paragraph{Submission 6: Classification-Tuned Model (0.9159).}
+Swapped one model for a YOLOv8x trained with $\text{cls}=2.0$ (double classification loss weight). This model scored \textbf{+0.015 higher on local train evaluation} but showed \textbf{zero improvement on test}. Critical lesson: \emph{classification-specialized models overfit to training data and do not generalize}. The higher cls loss causes the model to memorize training class distributions rather than learning generalizable features.
+
+\paragraph{Submission 7: Fulldata Seed Diversity (0.9152).}
+Three YOLOv8x models all trained on full data (no validation split) with seeds 42, 77, 123. Slightly worse than submission~5 which used split-trained models with seeds 42, 123, 999. This suggests that models trained with a validation split may actually learn slightly better features (the val signal provides implicit regularization through early stopping patterns), despite having fewer training images.
+
+\paragraph{Submission 8: Multi-Scale + Architecture Diversity (0.9210).}
+Our best submission combines three key innovations:
+\begin{enumerate}
+    \item \textbf{Multi-scale inference} (640px + 800px): Each model runs at two resolutions, catching both large and small products. The 800px scale is particularly important as 73\% of training images exceed 2000px width --- at 640px inference, 8.3\% of ground-truth boxes become smaller than 16px.
+    \item \textbf{Architecture diversity}: 2$\times$YOLOv8x + 1$\times$YOLOv8l provides genuinely different error patterns. YOLOv8l uses a different feature pyramid capacity and produces complementary predictions.
+    \item \textbf{WBF with \texttt{absent\_model\_aware\_avg}}: This confidence type avoids penalizing detections missed by only a subset of models, which is especially important when combining architectures of different strengths.
+\end{enumerate}
+
+\paragraph{Submission 9: Three-Scale Inference with Weighted WBF (0.9205).}
+Building on the 0.9210 submission, we added a third inference scale (960px) and applied unequal WBF model weights ($w_{\text{YOLOv8x}} = 1.5$, $w_{\text{YOLOv8l}} = 1.0$). The rationale: (1)~960px captures finer product label text since 73\% of training images exceed 2000px width, and (2)~weighting by architecture strength should improve fusion quality. This yielded 18 inference passes per image (3 models $\times$ 3 scales $\times$ 2 flips).
+
+Result: \textbf{0.9205}, marginally below 0.9210. The 960px scale added inference cost without proportional benefit --- the 640+800 combination is already near-optimal for this dataset's resolution distribution. The weighted WBF had negligible impact (confirmed by local sweep: $<$0.0004 difference).
+
+\paragraph{Submission 10: Noflip Training (flipud=0.0) (0.9200).}
+We replaced the fulldata\_x model (trained with default \texttt{flipud=0.5}) with a noflip model trained with \texttt{flipud=0.0} --- disabling vertical flip augmentation entirely. The hypothesis: grocery products on shelves are \emph{never} upside-down, so vertical flips create unrealistic training examples that waste model capacity.
+
+Locally, the noflip model scored \textbf{+0.0043 higher} (0.9493 vs 0.9450), with the classification gain even larger (+0.0080). However, on the test set it scored \textbf{0.9200} --- slightly below the 0.9210 baseline. This may indicate that the noflip model, while learning better class features for training products, has slightly less robust detection for the different product layouts in the test set.
+
+Key lesson: \emph{Even theoretically justified training changes can fail to improve test scores when the dataset is small and the val/test distributions differ.}
+
+\subsection{Ablation Summary}
+
+Table~\ref{tab:ablation} shows the contribution of each component.
+
+\begin{table}[H]
+\centering
+\caption{Ablation study. Each row adds one component to the previous configuration.}
+\label{tab:ablation}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Configuration} & \textbf{Test Score} & \textbf{$\Delta$} \\
+\midrule
+Single YOLOv8x (640px)                            & 0.7802 & --- \\
+$+$ WBF 3-model ensemble                          & 0.9091 & $+$0.1289 \\
+$+$ Soft voting $\to$ WBF                          & 0.9160 & $+$0.0069 \\
+$+$ TTA horizontal flip                           & 0.9160 & (included above) \\
+$+$ Multi-scale (640+800px)                        & 0.9210 & $+$0.0050 \\
+$+$ Architecture diversity (YOLOv8l)               & 0.9210 & (included above) \\
+$+$ \texttt{absent\_model\_aware\_avg}             & 0.9210 & (included above) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Negative Results}
+
+Table~\ref{tab:negative} documents approaches that did \emph{not} improve test scores, providing guidance for future work.
+
+\begin{table}[H]
+\centering
+\caption{Techniques that did not improve test scores. ``Local $\Delta$'' shows improvement on training set evaluation; ``Test $\Delta$'' shows actual test improvement.}
+\label{tab:negative}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Technique} & \textbf{Local $\Delta$} & \textbf{Test $\Delta$} & \textbf{Conclusion} \\
+\midrule
+cls=2.0 loss weight          & $+$0.015 & $+$0.000 & Overfits training classes \\
+Temperature scaling          & $+$0.000 & N/A      & No effect on soft voting \\
+Neighbor class voting        & $-$0.004 & N/A      & Too aggressive, flips correct predictions \\
+Soft-NMS (vs hard NMS)       & $-$0.001 & N/A      & Hard NMS already optimal \\
+Model soup (weight avg)      & $-$0.015 & N/A      & Reduces diversity when paired with same-seed models \\
+4-model ensemble             & N/A      & N/A      & Violates max 3 weight files rule \\
+Multi-scale TTA (broken)     & $-$0.350 & N/A      & Duplicate boxes not merged \\
+WBF IoU $<$ 0.55             & $-$0.003 & N/A      & Merges distinct products on dense shelves \\
+skip\_box\_thr $>$ 0.02      & $-$0.003 & N/A      & Kills recall, hurts mAP \\
+Gallery re-ranking (ConvNeXt) & $-$0.003 & N/A     & Overrides correct predictions \\
+Gallery re-ranking (KNN)     & $-$0.002 & N/A      & Cannot distinguish fine-grained variants \\
+960px third scale            & N/A      & $-$0.001 & Diminishing returns beyond 640+800 \\
+Noflip training (flipud=0.0) & $+$0.004 & $-$0.001 & Better locally, not on test \\
+Two-stage trained classifier & $+$0.007 & $-$0.011 & 96.9\% train acc but overfits to crops \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Error Analysis}
+
+Classification remains the primary bottleneck. Analysis of remaining errors shows:
+\begin{itemize}
+    \item \textbf{74\% same-brand confusion}: Products from the same brand but different sizes or variants (e.g., ``Nescaf\'e Gull 100g'' vs ``200g'', ``Husman Knekkebrr{\o}d 260g'' vs ``520g'').
+    \item \textbf{15\% small object misses}: Products smaller than 32px at inference resolution have a 15.2\% miss rate.
+    \item \textbf{23 near-zero AP classes}: Almost all single-instance categories that cannot be learned from one example.
+\end{itemize}
+
+The same-brand confusion errors fundamentally require text reading capability, which current YOLO architectures lack. Higher inference resolution (800--960px) partially addresses this by making product labels more legible to the feature extractor.
+
+\subsection{Exhaustive Post-Processing Evaluation}
+
+Beyond the approaches tested on the competition server, we conducted extensive local evaluations of post-processing techniques, summarized in Table~\ref{tab:postproc}.
+
+\begin{table}[H]
+\centering
+\caption{Post-processing techniques evaluated locally. All deltas relative to the WBF baseline (0.9450 local).}
+\label{tab:postproc}
+\small
+\begin{tabular}{@{}lcl@{}}
+\toprule
+\textbf{Technique} & \textbf{Local $\Delta$} & \textbf{Details} \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{WBF Parameter Sweep (21 configurations)}} \\
+\quad IoU threshold 0.50--0.65 & $\pm$0.0007 & Flat region; 0.60 near-optimal \\
+\quad skip\_box\_thr 0.01--0.05 & $-$0.003 & Higher threshold kills recall \\
+\quad Weighted WBF [2,1,1] & $+$0.0004 & Negligible improvement \\
+\quad conf\_type variants & $\pm$0.0002 & absent\_model\_aware\_avg is best \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{NMS Variants}} \\
+\quad Soft-NMS Gaussian ($\sigma$=0.3--1.0) & $-$0.0005 & Hard NMS already optimal \\
+\quad Soft-NMS Linear ($t$=0.3) & $-$0.0001 & No improvement \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Classification Post-Processing}} \\
+\quad Temperature scaling ($T$=0.3--2.0) & $\pm$0.0001 & No effect on soft voting \\
+\quad Neighbor shelf-row voting & $-$0.004 & Too aggressive, flips correct labels \\
+\quad Gallery re-ranking ConvNeXt (33 configs) & $-$0.003 to $-$0.005 & Cannot distinguish fine-grained variants \\
+\quad Gallery re-ranking KNN ($k$=3--20) & $-$0.001 to $-$0.005 & Same issue \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Ensemble Composition (20 three-model combos)}} \\
+\quad Best: cls20 + cls15 + fulldata\_s123 & $+$0.019 & But cls-tuned models don't generalize \\
+\quad Best diverse: fulldata + noflip + yolov8l & $+$0.007 & Maximum diversity across 3 axes \\
+\quad Worst: seed999 + yolov8l + soup & $-$0.009 & Soup reduces ensemble diversity \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Model Soup Analysis}
+
+We implemented Stochastic Weight Averaging (SWA) to create ``model soups'' by averaging weights from multiple training runs. Two variants were tested:
+
+\begin{enumerate}
+\item \textbf{3-seed soup} (seeds 42, 77, 123): Averaged standard-augmentation yolov8x models. When used as one member of a 3-model WBF ensemble, it scored $-$0.015 locally --- the averaging removed the diversity that WBF exploits.
+
+\item \textbf{4-seed noflip soup} (noflip seeds 42, 77, 123, 999): Averaged realistic-augmentation models. Scored $-$0.008 locally in ensemble --- same issue. The ``blurred'' averaged model is individually weaker than its components.
+\end{enumerate}
+
+\textbf{Key insight}: Model soups are designed for \emph{single-model} deployment where they improve generalization. In our \emph{multi-model ensemble}, the soup's smoothing removes exactly the prediction disagreements that WBF leverages.
+
+\subsection{Gallery-Based Classification Re-Ranking}
+
+We built a product gallery embedding system using timm's ConvNeXt-Base (pre-trained on ImageNet-22K), computing 1024-dim feature vectors for 4,413 product images (1,577 reference photos + 2,836 training crops across all 356 categories). The gallery was stored as a 17.2\,MB \texttt{.npz} file.
+
+We swept 33 re-ranking configurations varying:
+\begin{itemize}
+\item Matching method (mean cosine vs.\ KNN with $k \in \{3, 5, 10, 15, 20\}$)
+\item Re-rank score threshold (0.3 to 1.0)
+\item Override margin (0.0 to 0.2)
+\item Gallery override confidence threshold (0.1 to 0.5)
+\end{itemize}
+
+\textbf{Every configuration hurt performance} ($-$0.001 to $-$0.005). The ConvNeXt features, trained on ImageNet, cannot distinguish same-brand product variants that differ only in small label text (e.g., ``100g'' vs ``200g''). The YOLO ensemble's own learned features, trained directly on this domain, are more discriminative for this task.
+
+% ===========================================================================
+\section{Exploration Maps}
+\label{sec:maps}
+
+Visual overviews of our exploration strategy are provided in the companion document \texttt{exploration\_maps.pdf}, containing two radar-style compass diagrams:
+
+\begin{enumerate}
+\item \textbf{Exploration Map} (Page 1): All approaches tried during the competition, organized by category (Model Architecture, Inference Strategy, Post-Processing, Training Strategy, Classification, Data) with concentric rings indicating impact level. Color coding: green = successful/in best submission, red = tried and failed, yellow = untried.
+
+\item \textbf{Future Opportunity Map} (Page 2): Untried approaches ranked by estimated impact, with stars marking highest-priority items (YOLO11x, RT-DETR, CLIP embeddings).
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth,page=1]{exploration_maps.pdf}
+\caption{Exploration map showing all approaches tried during the competition. Green = successful (in best submission), red = tried and failed, yellow = untried. Distance from center indicates impact level.}
+\label{fig:exploration}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth,page=2]{exploration_maps.pdf}
+\caption{Future opportunity map showing untried approaches by estimated impact. Stars indicate highest-priority items.}
+\label{fig:opportunities}
+\end{figure}
+
+Key observations from the maps:
+\begin{itemize}
+\item The ``green path'' to 0.9210 runs through the North (architecture diversity) and East (multi-scale + TTA) directions --- model and inference improvements.
+\item The South (post-processing) and West-Southwest (training tricks, gallery re-ranking) directions are saturated --- 33+ configurations tested with no improvement.
+\item The most promising untested directions are Northeast (CLIP/contrastive classification) and North (YOLO11x/RT-DETR transformer architectures).
+\end{itemize}
+
+% ===========================================================================
+\section{Infrastructure}
+\label{sec:infra}
+
+\subsection{Training Infrastructure}
+
+All model training was conducted on \textbf{Azure Machine Learning} using the \texttt{nmai-experis} workspace:
+\begin{itemize}    \item \textbf{Compute}: \texttt{ainmxperis} cluster --- up to 8 nodes of Standard\_NC4as\_T4\_v3 (NVIDIA T4, 16\,GB VRAM each)
+    \item \textbf{Base image}: \texttt{acpt-pytorch-2.2-cuda12.1}
+    \item \textbf{Framework}: Ultralytics 8.1.0 with careful NumPy version pinning (\texttt{numpy<2}) to avoid matplotlib compatibility issues
+\end{itemize}
+
+Over the 69-hour competition, we executed \textbf{150+ training runs} across different model architectures, hyperparameter configurations, augmentation strategies, and random seeds. Key training dimensions explored:
+
+\begin{itemize}
+\item \textbf{Architectures}: YOLOv8x, YOLOv8l, YOLOv8m, YOLOv8s, YOLO11x, RT-DETR, YOLO26x
+\item \textbf{Image sizes}: 640, 800, 960, 1280px
+\item \textbf{Seeds}: 1, 2, 3, 5, 7, 13, 42, 77, 123, 256, 314, 512, 999, 2024
+\item \textbf{Augmentation}: flipud (0.0 vs 0.5), copy-paste (0.0--0.3), mixup (0.0--0.5), mosaic, scale, degrees, close-mosaic timing
+\item \textbf{Loss}: cls weight (0.5, 1.0, 1.5, 2.0), label smoothing (0.05, 0.1)
+\item \textbf{Optimizer}: AdamW (lr 0.001--0.01), SGD (lr 0.005--0.01)
+\item \textbf{Epochs}: 150, 200, 250, 300
+\end{itemize}
+
+\subsection{Cached Prediction System}
+
+To enable rapid parameter sweeps, we implemented a \textbf{prediction caching system}: each ONNX model's raw detections (boxes, scores, 356-dim class probabilities) on all 248 training images were serialized to a pickle file ($\sim$300--700\,MB per 3-model cache). This allowed:
+
+\begin{itemize}
+\item Testing all $\binom{6}{3} = 20$ three-model combinations from 6 candidate models in under 60 seconds
+\item Sweeping 21 WBF parameter configurations in under 30 seconds
+\item Evaluating soft-NMS variants, temperature scaling, and ensemble strategies without any model inference
+\end{itemize}
+
+The caching approach was critical: a single full evaluation (3 models $\times$ 248 images) took 60+ minutes on CPU vs.\ $<$3 seconds with cached predictions.
+
+\subsection{Submission Validation Pipeline}
+
+After an accidental \texttt{import sys} in a submission caused an \textbf{automatic account ban} (the sandbox security scanner immediately blocks submissions containing prohibited imports), we built a comprehensive validation pipeline:
+
+\begin{itemize}
+\item \textbf{\texttt{validate\_submission.py}}: Checks all sandbox rules --- blocked imports (23 modules), blocked function calls, file count/size limits, weight file count ($\leq$3), path traversal, binary executables, and output format compliance.
+\item \textbf{Pytest suite}: 10 automated tests per submission ZIP, run before every build.
+\item \textbf{Docker testing}: Local sandbox replica for end-to-end validation.
+\end{itemize}
+
+This pipeline prevented at least 2 additional invalid submissions (4-weight-file ZIPs that would have been rejected).
+
+% ===========================================================================
+\section{Lessons Learned}
+\label{sec:lessons}
+
+\subsection{Local Validation Does Not Predict Test Performance}
+
+Our most important finding: \textbf{validation mAP does not reliably predict test set mAP}.
+A YOLOv8l model with seed~77 achieved val~mAP~=~0.8040 but scored only 0.7700 on the test set, while a YOLOv8x model with seed~42 achieved lower val~mAP but scored 0.7802 on the test set.
+With only $\sim$37 validation images (15\% of 248), the validation set is too small and non-representative for reliable model selection.
+
+This led us to:
+\begin{enumerate}    \item Train on the full dataset without a validation split for final submissions.
+    \item Rely on test set feedback (within the 3/day limit) for model selection.
+    \item Prioritize known-generalizing strategies (ensembles, multi-scale) over validation-score optimization.
+\end{enumerate}
+
+\subsection{Diversity over Specialization}
+
+Ensembles of diverse models (different architectures, seeds) consistently outperformed ensembles of identical architectures.
+The key insight is that ensemble methods like WBF extract value from \emph{disagreement} --- if all models make the same errors, fusion cannot help.
+
+\subsection{WBF over Soft Voting}
+
+WBF~\citep{solovyev2021wbf} consistently outperformed NMS-based ensemble aggregation (including Soft-NMS).
+WBF's box-averaging mechanism produces more accurate bounding boxes than selecting a single ``winner,'' which directly impacts IoU-based metrics.
+
+\subsection{Realistic Augmentation: flipud = 0.0}
+
+Setting \texttt{flipud=0.0} (disabling vertical flip augmentation) improved performance.
+Grocery shelf images have a strong prior on vertical orientation --- products are always upright.
+Vertical flips create unrealistic training examples that confuse the model, particularly for text-heavy product labels.
+
+\subsection{Sandbox Compatibility Pitfalls}
+
+Two critical compatibility issues consumed significant debugging time:
+\begin{itemize}    \item \textbf{PyTorch 2.6.0 breaks \texttt{.pt} loading}: The sandbox uses PyTorch~2.6.0, which introduced \texttt{weights\_only=True} as the default for \texttt{torch.load()}.
+    This silently breaks Ultralytics \texttt{.pt} model loading.
+    \emph{Solution}: Always export to ONNX format.
+    \item \textbf{\texttt{import sys} causes auto-ban}: An undocumented sandbox security policy flags submissions that use \texttt{import sys}, resulting in automatic rejection.
+    This cost us a submission slot before identifying the cause.
+\end{itemize}
+
+% ===========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented a multi-scale ensemble approach for grocery shelf product detection, achieving 4th place in the NM i AI 2026 Task~3 with a score of 0.9210 mAP.
+Our key contributions are:
+\begin{enumerate}    \item A heterogeneous ensemble strategy combining YOLOv8x and YOLOv8l architectures for maximal prediction diversity.
+    \item Multi-scale inference (640px + 800px) with horizontal-flip TTA, fused via WBF with absent-model-aware averaging.
+    \item Practical insights on FP16 ONNX export for competition submission constraints and sandbox compatibility.
+    \item Evidence that validation metrics on small datasets are unreliable, and that ensemble diversity matters more than individual model strength.
+\end{enumerate}
+
+The primary avenue for improvement would be better classification of same-brand product variants, which accounts for 74\% of our errors.
+Potential approaches include contrastive learning on product reference images, attention-based fine-grained classifiers, or OCR-augmented re-ranking pipelines.
+
+% ===========================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem[Jocher et~al.(2023)]{jocher2023yolov8}
+G.~Jocher, A.~Chaurasia, and J.~Qiu.
+\newblock Ultralytics {YOLO}, 2023.
+\newblock \url{https://github.com/ultralytics/ultralytics}.
+
+\bibitem[Solovyev et~al.(2021)]{solovyev2021wbf}
+R.~Solovyev, W.~Wang, and T.~Gabruseva.
+\newblock Weighted boxes fusion: Ensembling boxes from different object detection models.
+\newblock \emph{Image and Vision Computing}, 107:104117, 2021.
+
+\bibitem[Redmon et~al.(2016)]{redmon2016yolo}
+J.~Redmon, S.~Divvala, R.~Girshick, and A.~Farhadi.
+\newblock You only look once: Unified, real-time object detection.
+\newblock In \emph{CVPR}, 2016.
+
+\bibitem[Lin et~al.(2014)]{lin2014coco}
+T.-Y.~Lin, M.~Maire, S.~Belongie, J.~Hays, P.~Perona, D.~Ramanan, P.~Doll{\'a}r, and C.~L.~Zitnick.
+\newblock Microsoft {COCO}: Common objects in context.
+\newblock In \emph{ECCV}, 2014.
+
+\bibitem[Bodla et~al.(2017)]{bodla2017softnms}
+N.~Bodla, B.~Singh, R.~Chellappa, and L.~S.~Davis.
+\newblock Soft-{NMS} --- improving object detection with one line of code.
+\newblock In \emph{ICCV}, 2017.
+
+\bibitem[Wang et~al.(2023)]{wang2023yolov7}
+C.-Y.~Wang, A.~Bochkovskiy, and H.-Y.~M.~Liao.
+\newblock {YOLOv7}: Trainable bag-of-freebies sets new state-of-the-art for real-time object detectors.
+\newblock In \emph{CVPR}, 2023.
+
+\end{thebibliography}
+
+\end{document}

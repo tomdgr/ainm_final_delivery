@@ -1,0 +1,214 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{verbatim}
+
+\definecolor{running}{HTML}{2196F3}
+\definecolor{done}{HTML}{4CAF50}
+\definecolor{failed}{HTML}{F44336}
+\definecolor{planned}{HTML}{FF9800}
+\definecolor{codebg}{HTML}{F5F5F5}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  breaklines=true,
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{NM i AI 2026 -- Team Experis}
+\lhead{NorgesGruppen Detection}
+\rfoot{Page \thepage}
+\lfoot{Updated: \today}
+
+\title{\textbf{NorgesGruppen Detection} \\ \large Task 2 Status Report \\ NM i AI 2026}
+\author{Team Experis \\ Tom Daniel Grande, Henrik Skulevold, Tobias Korten, Fridtjof Hoyer}
+\date{March 19, 2026 -- Competition Hour 3}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Competition Overview}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Metric} & $\text{Score} = 0.7 \times \text{det\_mAP@0.5} + 0.3 \times \text{cls\_mAP@0.5}$ \\
+\textbf{Sandbox} & Python 3.11, NVIDIA L4 (24GB), 300s timeout, no network \\
+\textbf{Submissions} & 3/day, resets midnight UTC \\
+\textbf{Data} & 248 images, 356 classes, 22,731 annotations \\
+\textbf{Key challenge} & Very long-tailed: 74 classes with $<$5 samples \\
+\bottomrule
+\end{tabular}
+
+\subsection{Scoring Breakdown}
+\begin{itemize}[nosep]
+  \item \textbf{70\% Detection}: Did you find the product? (IoU $\geq$ 0.5, category ignored)
+  \item \textbf{30\% Classification}: Did you identify it correctly? (IoU $\geq$ 0.5 + correct category\_id)
+  \item Detection-only (all category\_id=0) $\rightarrow$ max score 0.70
+\end{itemize}
+
+% ============================================================
+\section{Current Training Runs}
+
+All jobs on Azure ML compute \texttt{ainmxperis} (Standard\_NC4as\_T4\_v3, 16GB VRAM).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llllll@{}}
+\toprule
+\textbf{Job} & \textbf{Model} & \textbf{ImgSz} & \textbf{Epochs} & \textbf{Batch} & \textbf{Notes} \\
+\midrule
+\textcolor{running}{eager\_holiday} & YOLOv8x & 640 & 150 & 8 & Baseline \\
+\textcolor{running}{nice\_answer} & YOLOv8l & 1280 & 100 & 2 & High-res, multi-scale \\
+\textcolor{running}{witty\_muscle} & YOLOv8l & 640 & 200 & 16 & Heavy aug (mixup=0.3) \\
+\textcolor{running}{tender\_seal} & YOLOv8m & 640 & 200 & 16 & SGD, seed=123 \\
+\textcolor{running}{polite\_lizard} & YOLOv8s & 640 & 300 & 32 & Fast, long training \\
+\textcolor{running}{quiet\_crayon} & YOLO11x & 640 & 150 & 8 & Latest arch + ONNX export \\
+\bottomrule
+\end{tabular}
+\caption{Active Azure ML training jobs. All use \texttt{ultralytics==8.1.0} except YOLO11 (latest).}
+\end{table}
+
+\subsection{Why These Configurations?}
+\begin{itemize}[nosep]
+  \item \textbf{Multiple model sizes}: WBF ensemble of diverse models outperforms any single best model
+  \item \textbf{Different optimizers}: AdamW vs SGD produce different error profiles
+  \item \textbf{Different seeds}: Different train/val splits for ensemble diversity
+  \item \textbf{Heavy augmentation}: 248 images is tiny -- mixup, copy-paste, mosaic prevent overfitting
+  \item \textbf{YOLO11}: Newer architecture, will be exported to ONNX for sandbox compatibility
+\end{itemize}
+
+% ============================================================
+\section{Architecture Variants}
+
+\subsection{YOLOv8 Family (Running)}
+Native \texttt{.pt} weights work in sandbox with \texttt{ultralytics==8.1.0}. Five variants running for ensemble diversity.
+
+\subsection{YOLO11 via ONNX (Running)}
+Train with latest ultralytics, export to ONNX (opset 17). Sandbox runs via \texttt{onnxruntime-gpu} with \texttt{CUDAExecutionProvider}. Better architecture than v8 but adds ONNX post-processing complexity.
+
+\subsection{SAHI Tiled Inference (Built, Ready)}
+Images are 2000--4000px but model sees 640px. SAHI slices into overlapping tiles, runs detector on each, merges with NMS. Free accuracy boost for small objects, no retraining.
+
+\textbf{Module}: \texttt{nm\_ai\_image/detection/sahi.py}
+
+\subsection{Two-Stage: Detect $\rightarrow$ Classify (Built, Ready)}
+\begin{enumerate}[nosep]
+  \item YOLOv8 finds bounding boxes (targets 70\% detection score)
+  \item Crop each detection, extract ResNet50 embedding
+  \item Match against gallery of reference + training embeddings (targets 30\% classification score)
+\end{enumerate}
+
+Gallery built: \textbf{356/356 classes covered} (1,577 reference images + 2,836 training crops).
+
+Especially valuable for the 74 classes with $<$5 annotations where YOLOv8 can't learn the class but can still find the box.
+
+\textbf{Module}: \texttt{nm\_ai\_image/detection/classifier.py}
+
+% ============================================================
+\section{Submission Strategy}
+
+We have 3 submissions/day. Planned approach:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Submission} & \textbf{Strategy} & \textbf{Expected Score Range} \\
+\midrule
+1 (conservative) & Best single YOLOv8 + TTA & 0.40--0.60 \\
+2 (ensemble) & WBF of 3--5 models + SAHI & 0.50--0.70 \\
+3 (full pipeline) & Ensemble + SAHI + two-stage classifier & 0.55--0.75 \\
+\bottomrule
+\end{tabular}
+\caption{Planned submissions in order of complexity.}
+\end{table}
+
+% ============================================================
+\section{Package Structure}
+
+\begin{lstlisting}
+nm_ai_image/detection/
+  data.py          # COCOToYOLO converter
+  train.py         # Ultralytics training wrapper
+  inference.py     # Detector + EnsembleDetector (WBF)
+  sahi.py          # Sliced/tiled inference
+  onnx_inference.py # ONNX detector (YOLO11, etc)
+  classifier.py    # Embedding gallery + two-stage
+  evaluate.py      # Competition scoring (70/30)
+  submission.py    # ZIP builder (6 modes)
+\end{lstlisting}
+
+\subsection{CLI Usage}
+\begin{lstlisting}
+# Train
+python main.py detect --model yolov8x.pt --imgsz 640 --epochs 150
+
+# Evaluate
+python main.py eval best.pt
+
+# Build gallery
+python main.py gallery
+
+# Build submissions
+python main.py submission best.pt                     # single
+python main.py submission m1.pt m2.pt --ensemble      # WBF
+python main.py submission best.pt --sahi              # tiled
+python main.py submission model.onnx --onnx           # ONNX
+python main.py submission best.pt --gallery emb.pt    # two-stage
+\end{lstlisting}
+
+% ============================================================
+\section{Data Analysis}
+
+\begin{itemize}[nosep]
+  \item 248 shelf images, wildly varying dimensions (481$\times$640 to 5712$\times$4284)
+  \item 356 product categories + 1 unknown\_product class
+  \item 22,731 annotations ($\sim$92 per image)
+  \item \textbf{Long tail}: 74 classes with $<$5 annotations, 110 with $<$10
+  \item \textbf{Reference images}: 327 products with multi-angle photos (1,582 total)
+  \item 323/356 categories have reference images; 33 missing (mostly eggs, some coffee)
+  \item 4 store sections: Egg, Frokost, Knekkebr\o d, Varmedrikker
+\end{itemize}
+
+% ============================================================
+\section{Sandbox Constraints}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Resource} & \textbf{Limit} \\
+\midrule
+GPU & NVIDIA L4 (24GB VRAM) \\
+CPU/RAM & 4 vCPU / 8 GB \\
+Timeout & 300 seconds \\
+Network & None (fully offline) \\
+Weight files & Max 3, total 420 MB \\
+Python files & Max 10 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Pre-installed}: ultralytics 8.1.0, torchvision 0.21.0, timm 0.9.12, onnxruntime-gpu 1.20.0, ensemble-boxes 1.0.9, supervision 0.18.0
+
+\textbf{Blocked imports}: os, sys, subprocess, socket, ctypes, builtins, pickle, yaml, requests
+
+\textbf{Key}: We can use up to 3 weight files (420MB total). This means we can ensemble 3 models in the submission ZIP.
+
+% ============================================================
+\section{Known Issues \& Lessons}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Azure ML numpy conflict}: Base image has numpy 1.23 + matplotlib 3.5. Installing ultralytics upgrades to numpy 2.x which breaks matplotlib. Fix: install numpy$<$2 \textit{after} ultralytics.
+  \item \textbf{Azure ML code caching}: \texttt{code: .} snapshots are cached. Must ensure code changes are saved before job submission.
+  \item \textbf{T4 OOM}: YOLOv8x at 1280px OOMs on 16GB T4. Use YOLOv8l or smaller.
+  \item \textbf{RT-DETR broken}: \texttt{RTDETRDecoder} has no \texttt{stride} attribute in ultralytics 8.1.0.
+  \item \textbf{Lazy imports required}: \texttt{main.py} must not import lightning at top level (Azure ML image conflicts).
+\end{enumerate}
+
+\end{document}
